@@ -1,25 +1,25 @@
-# fieldcore (Python client)
+# khwan (Python client)
 
-The FieldCore hosted client — a thin HTTP wrapper with **no engine code**. FieldCore
+The Khwan hosted client — a thin HTTP wrapper with **no engine code**. Khwan
 is a cognition layer (memory + constitutional identity + coherence + learning) that
 runs on our server; you bring your own model.
 
 ```bash
-pip install fieldcore
+pip install khwan
 ```
 
 ## BYOM — you call your own model
 ```python
-from fieldcore import FieldCore
+from khwan import Khwan
 
-fc = FieldCore(api_key="fck_live_xxx", user_id="alice")
+fc = Khwan(api_key="kwk_live_xxx", user_id="alice")
 
 turn   = fc.prepare("remember I prefer short answers in Thai")  # FC builds context, no LLM
 answer = my_own_llm(turn.messages)                              # YOUR model + key
 fc.record(turn, answer)                                          # FC persists + learns
 ```
 
-`turn.messages` is a standard `[{role, content}]` array with FieldCore's value baked
+`turn.messages` is a standard `[{role, content}]` array with Khwan's value baked
 into the system prompt (learned lessons + constitution + retrieved memory + coherence).
 `my_own_llm` is just your normal LLM call:
 
@@ -44,8 +44,8 @@ print(reply.text, reply.coherence, reply.sources)
 ## On-prem
 Same code, point at your instance:
 ```python
-fc = FieldCore(api_key="fck_...", user_id="alice",
-               base_url="https://fieldcore.internal.acme.com")
+fc = Khwan(api_key="kwk_...", user_id="alice",
+               base_url="https://khwan.internal.acme.com")
 ```
 
 `memory=`/`embedder=` are server-managed and rejected here — they exist only in the

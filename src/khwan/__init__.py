@@ -1,14 +1,14 @@
-"""FieldCore hosted client (public).
+"""Khwan hosted client (public).
 
-A thin HTTP wrapper — contains NO FieldCore engine code. The Brain (memory,
-constitution, coherence, learning) runs on the FieldCore server; this client just
+A thin HTTP wrapper — contains NO Khwan engine code. The Brain (memory,
+constitution, coherence, learning) runs on the Khwan server; this client just
 connects and hands results back to your app.
 
-Positioning: FieldCore is a **cognition layer**, not the model. You bring your own
+Positioning: Khwan is a **cognition layer**, not the model. You bring your own
 model (BYOM). Two ways to use it:
 
   # BYOM (recommended): FC prepares context, YOU call your own model, FC records
-  fc = FieldCore(api_key="fck_live_xxx", user_id="alice")
+  fc = Khwan(api_key="kwk_live_xxx", user_id="alice")
   turn   = fc.prepare("remember I like short answers")   # no LLM on FC's side
   answer = my_own_llm(turn.messages)                      # your model, your key
   fc.record(turn, answer)                                 # FC learns
@@ -28,10 +28,10 @@ from typing import Any, Dict, List, Optional
 import requests
 
 __version__ = "0.1.0"
-DEFAULT_BASE_URL = "https://api.fieldcore.ai"
+DEFAULT_BASE_URL = "https://api.khwan.ai"
 
 
-class FieldCoreError(RuntimeError):
+class KhwanError(RuntimeError):
     """Raised on a non-2xx response. `.status` is the HTTP code."""
 
     def __init__(self, status: int, message: str):
@@ -62,7 +62,7 @@ class Reply:
 
 
 class Turn:
-    """Context FieldCore prepared for one turn. Feed `.messages` to your own model,
+    """Context Khwan prepared for one turn. Feed `.messages` to your own model,
     then pass this object (plus the model's answer) back to `fc.record()`."""
 
     def __init__(self, data: Dict[str, Any]):
@@ -96,7 +96,7 @@ class Turn:
         return self._d
 
 
-class FieldCore:
+class Khwan:
     def __init__(self, *, user_id: str, api_key: Optional[str] = None,
                  base_url: str = DEFAULT_BASE_URL,
                  model: Optional[str] = None, constitution: Optional[str] = None,
@@ -104,10 +104,10 @@ class FieldCore:
         if memory is not None or embedder is not None:
             raise TypeError(
                 "memory/embedder are server-managed in the hosted client; they are "
-                "only configurable in the on-prem engine (fieldcore-engine, under license)."
+                "only configurable in the on-prem engine (khwan-engine, under license)."
             )
         if not api_key:
-            raise ValueError("api_key is required (get one from your FieldCore dashboard).")
+            raise ValueError("api_key is required (get one from your Khwan dashboard).")
         self.user_id = user_id
         self._key = api_key
         self._base = base_url.rstrip("/")
@@ -121,7 +121,7 @@ class FieldCore:
     def _headers(self) -> Dict[str, str]:
         h = {"X-API-Key": self._key}
         if self.user_id:
-            h["X-FieldCore-User"] = self.user_id  # 1 key → many end-user brains
+            h["X-Khwan-User"] = self.user_id  # 1 key → many end-user brains
         return h
 
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
@@ -133,7 +133,7 @@ class FieldCore:
                 402: "payment required — add a payment method / upgrade your plan",
                 429: "quota exceeded — you are over your plan's limit",
             }.get(r.status_code, r.text[:300])
-            raise FieldCoreError(r.status_code, msg)
+            raise KhwanError(r.status_code, msg)
         return r.json() if r.content else {}
 
     # ---- BYOM: prepare → (your model) → record ----
@@ -162,4 +162,4 @@ class FieldCore:
         return self._request("GET", "/metrics")
 
 
-__all__ = ["FieldCore", "Reply", "Turn", "FieldCoreError"]
+__all__ = ["Khwan", "Reply", "Turn", "KhwanError"]
