@@ -4,18 +4,14 @@ A thin HTTP wrapper — contains NO Khwan engine code. The Brain (memory,
 constitution, coherence, learning) runs on the Khwan server; this client just
 connects and hands results back to your app.
 
-Positioning: Khwan is a **cognition layer**, not the model. You bring your own
-model (BYOM). Two ways to use it:
+Positioning: Khwan is a pure **AI-memory layer** — it never runs a model. You
+always call your own model (BYOM). The only loop is
+`prepare` → (your model) → `record`:
 
-  # BYOM (recommended): FC prepares context, YOU call your own model, FC records
-  fc = Khwan(api_key="kwk_live_xxx", user_id="alice")
-  turn   = fc.prepare("remember I like short answers")   # no LLM on FC's side
-  answer = my_own_llm(turn.messages)                      # your model, your key
-  fc.record(turn, answer)                                 # FC learns
-
-  # Convenience (server-side generation, if your plan enables it):
-  reply = fc.chat("remember I like short answers")
-  print(reply.text, reply.coherence)
+  kw     = Khwan(api_key="kwk_live_xxx", user_id="alice")
+  turn   = kw.prepare("remember I like short answers")   # no LLM on Khwan's side
+  answer = your_model(turn.messages)                      # your model, your key
+  kw.record(turn, answer)                                 # Khwan learns
 
 `memory=`/`embedder=` are NOT configurable here — they are server-managed. They
 exist only in the on-prem engine (shipped under license).
@@ -39,31 +35,9 @@ class KhwanError(RuntimeError):
         super().__init__(message)
 
 
-class Reply:
-    """A server-generated chat reply."""
-
-    def __init__(self, data: Dict[str, Any]):
-        self._d = data
-
-    @property
-    def text(self) -> str:
-        return self._d.get("response", "")
-
-    @property
-    def coherence(self) -> Optional[float]:
-        return self._d.get("coherence")
-
-    @property
-    def sources(self) -> List[Any]:
-        return self._d.get("sources", [])
-
-    def raw(self) -> Dict[str, Any]:
-        return self._d
-
-
 class Turn:
     """Context Khwan prepared for one turn. Feed `.messages` to your own model,
-    then pass this object (plus the model's answer) back to `fc.record()`."""
+    then pass this object (plus the model's answer) back to `kw.record()`."""
 
     def __init__(self, data: Dict[str, Any]):
         self._d = data
@@ -136,20 +110,16 @@ class Khwan:
             raise KhwanError(r.status_code, msg)
         return r.json() if r.content else {}
 
-    # ---- BYOM: prepare → (your model) → record ----
+    # ---- the memory loop: prepare → (your model) → record ----
     def prepare(self, user_input: str) -> Turn:
-        """FC builds the context (memory + constitution + coherence). No LLM call."""
+        """Khwan builds the context (memory + constitution + coherence). No LLM call."""
         return Turn(self._request("POST", "/prepare",
                                   {"input": user_input, **self._cfg}))
 
     def record(self, turn: Turn, answer: str) -> dict:
-        """Hand your model's answer back so FC can persist + learn."""
+        """Hand your model's answer back so Khwan can persist + learn."""
         return self._request("POST", "/record",
                              {"turn_token": turn.turn_token, "answer": answer})
-
-    # ---- convenience: server-side generation ----
-    def chat(self, user_input: str) -> Reply:
-        return Reply(self._request("POST", "/chat", {"input": user_input, **self._cfg}))
 
     # ---- learning / inspection ----
     def sync(self) -> dict:
@@ -162,4 +132,4 @@ class Khwan:
         return self._request("GET", "/metrics")
 
 
-__all__ = ["Khwan", "Reply", "Turn", "KhwanError"]
+__all__ = ["Khwan", "Turn", "KhwanError"]
