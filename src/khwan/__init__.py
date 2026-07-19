@@ -76,7 +76,7 @@ class Turn:
 
 
 class Khwan:
-    def __init__(self, *, user_id: str, api_key: Optional[str] = None,
+    def __init__(self, *, user_id: Optional[str] = None, api_key: Optional[str] = None,
                  base_url: str = DEFAULT_BASE_URL,
                  model: Optional[str] = None, constitution: Optional[str] = None,
                  core: Optional[str] = None,
@@ -88,6 +88,9 @@ class Khwan:
             )
         if not api_key:
             raise ValueError("api_key is required (get one from your Khwan dashboard).")
+        # OPTIONAL end-user id. Omit for one shared brain per account/core. Set it to give
+        # each of your end-users a fully ISOLATED sub-brain (one key → a private brain per
+        # user); requires a paid plan. Combines with `core`: account::<core>::@<user>.
         self.user_id = user_id
         # Selects the isolated core this client targets. Each named core is a fully
         # isolated brain (own memory/identity/learning) within the same account.
@@ -105,7 +108,7 @@ class Khwan:
     def _headers(self) -> Dict[str, str]:
         h = {"X-API-Key": self._key}
         if self.user_id:
-            h["X-Khwan-User"] = self.user_id  # identifies the end user (not a separate brain)
+            h["X-Khwan-User"] = self.user_id  # optional: isolated sub-brain per end-user
         if self.core:
             h["X-Khwan-Core"] = self.core  # select the isolated core
         return h
