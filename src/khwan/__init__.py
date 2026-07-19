@@ -26,6 +26,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import random
+import time
+from email.utils import parsedate_to_datetime
+
 import requests
 
 __version__ = "0.1.0"
@@ -80,7 +84,8 @@ class Khwan:
                  base_url: str = DEFAULT_BASE_URL,
                  model: Optional[str] = None, constitution: Optional[str] = None,
                  core: Optional[str] = None,
-                 timeout: int = 60, memory: Any = None, embedder: Any = None):
+                 timeout: int = 60, max_retries: int = 2,
+                 memory: Any = None, embedder: Any = None):
         if memory is not None or embedder is not None:
             raise TypeError(
                 "memory/embedder are server-managed in the hosted client; they are "
@@ -99,6 +104,9 @@ class Khwan:
         self._key = api_key
         self._base = base_url.rstrip("/")
         self._timeout = timeout
+        # Auto-retry transient failures (429/502/503/504 honoring Retry-After, plus
+        # network errors on idempotent calls) with exponential backoff + jitter.
+        self._max_retries = max(0, max_retries)
         # session config forwarded to the server (model may be overridden by the
         # account's dashboard settings; constitution is a named profile reference).
         self._cfg = {k: v for k, v in
@@ -113,17 +121,61 @@ class Khwan:
             h["X-Khwan-Core"] = self.core  # select the isolated core
         return h
 
+    # Reads + prepare are safe to retry after an ambiguous network error (the
+    # request may already have been processed); record/sync/reset are NOT (replaying
+    # could double-apply or hit an already-consumed turn_token). A rejected
+    # 429/502/503/504 is safe to retry regardless — it wasn't processed.
+    _RETRY_STATUS = frozenset({429, 502, 503, 504})
+
+    def _is_idempotent(self, method: str, path: str) -> bool:
+        return method == "GET" or path == "/prepare"
+
+    def _retry_delay(self, attempt: int, resp: "Optional[requests.Response]") -> float:
+        """Seconds to wait: honor Retry-After if present, else exponential
+        (0.5, 1, 2, … capped 20s) with ±25% jitter."""
+        if resp is not None:
+            ra = resp.headers.get("Retry-After")
+            if ra:
+                try:
+                    return min(float(ra), 60.0)
+                except ValueError:
+                    try:
+                        dt = parsedate_to_datetime(ra)
+                        return max(0.0, dt.timestamp() - time.time())
+                    except (TypeError, ValueError):
+                        pass
+        base = min(0.5 * (2 ** attempt), 20.0)
+        return base * (0.75 + random.random() * 0.5)
+
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
-        r = requests.request(method, self._base + path, headers=self._headers(),
-                             json=body, timeout=self._timeout)
-        if r.status_code // 100 != 2:
-            msg = {
-                401: "unauthorized — bad or missing API key",
-                402: "payment required — add a payment method / upgrade your plan",
-                429: "quota exceeded — you are over your plan's limit",
-            }.get(r.status_code, r.text[:300])
-            raise KhwanError(r.status_code, msg)
-        return r.json() if r.content else {}
+        idempotent = self._is_idempotent(method, path)
+        attempt = 0
+        while True:
+            try:
+                r = requests.request(method, self._base + path,
+                                     headers=self._headers(), json=body,
+                                     timeout=self._timeout)
+            except requests.RequestException as e:
+                # Network/timeout error — retry only idempotent calls.
+                if idempotent and attempt < self._max_retries:
+                    time.sleep(self._retry_delay(attempt, None))
+                    attempt += 1
+                    continue
+                raise KhwanError(0, f"network error: {e}")
+
+            if r.status_code in self._RETRY_STATUS and attempt < self._max_retries:
+                time.sleep(self._retry_delay(attempt, r))
+                attempt += 1
+                continue
+
+            if r.status_code // 100 != 2:
+                msg = {
+                    401: "unauthorized — bad or missing API key",
+                    402: "payment required — add a payment method / upgrade your plan",
+                    429: "rate limited / over your plan's limit — retry later",
+                }.get(r.status_code, r.text[:300])
+                raise KhwanError(r.status_code, msg)
+            return r.json() if r.content else {}
 
     # ---- the memory loop: prepare → (your model) → record ----
     def prepare(self, user_input: str) -> Turn:
