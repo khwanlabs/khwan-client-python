@@ -13,6 +13,11 @@ always call your own model (BYOM). The only loop is
   answer = your_model(turn.messages)                      # your model, your key
   kw.record(turn, answer)                                 # Khwan learns
 
+Isolated cores — many separate brains within one account; pass ``core=``:
+
+  test = Khwan(api_key="kwk_live_xxx", user_id="alice", core="test")
+  kw.cores()   # list the account's cores (default included)
+
 `memory=`/`embedder=` are NOT configurable here — they are server-managed. They
 exist only in the on-prem engine (shipped under license).
 """
@@ -74,6 +79,7 @@ class Khwan:
     def __init__(self, *, user_id: str, api_key: Optional[str] = None,
                  base_url: str = DEFAULT_BASE_URL,
                  model: Optional[str] = None, constitution: Optional[str] = None,
+                 core: Optional[str] = None,
                  timeout: int = 60, memory: Any = None, embedder: Any = None):
         if memory is not None or embedder is not None:
             raise TypeError(
@@ -83,6 +89,10 @@ class Khwan:
         if not api_key:
             raise ValueError("api_key is required (get one from your Khwan dashboard).")
         self.user_id = user_id
+        # Selects the isolated core this client targets. Each named core is a fully
+        # isolated brain (own memory/identity/learning) within the same account.
+        # Omit for the account's default core.
+        self.core = core
         self._key = api_key
         self._base = base_url.rstrip("/")
         self._timeout = timeout
@@ -95,7 +105,9 @@ class Khwan:
     def _headers(self) -> Dict[str, str]:
         h = {"X-API-Key": self._key}
         if self.user_id:
-            h["X-Khwan-User"] = self.user_id  # 1 key → many end-user brains
+            h["X-Khwan-User"] = self.user_id  # identifies the end user (not a separate brain)
+        if self.core:
+            h["X-Khwan-Core"] = self.core  # select the isolated core
         return h
 
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
@@ -130,6 +142,11 @@ class Khwan:
 
     def metrics(self) -> dict:
         return self._request("GET", "/metrics")
+
+    def cores(self) -> List[Dict[str, Any]]:
+        """List the isolated cores on this account. The default core is included,
+        with ``is_default`` True."""
+        return self._request("GET", "/cores")  # type: ignore[return-value]
 
 
 __all__ = ["Khwan", "Turn", "KhwanError"]
