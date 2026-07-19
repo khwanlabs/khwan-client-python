@@ -38,6 +38,19 @@ def your_model(messages):
     return r.content[0].text
 ```
 
+## Isolated cores
+One account can hold many **cores** — fully separate brains, each with its own
+memory, identity, and learning. Point a client at one with `core`:
+
+```python
+test    = Khwan(api_key="kwk_live_xxx", user_id="alice", core="test")
+client1 = Khwan(api_key="kwk_live_xxx", user_id="alice", core="client1")
+
+kw.cores()   # list the account's cores (the default core is included)
+```
+
+`test` and `client1` never share memory. Omit `core` for the account's default brain.
+
 ## On-prem
 Same code, point at your instance:
 ```python
