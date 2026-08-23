@@ -24,6 +24,7 @@ exist only in the on-prem engine (shipped under license).
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Optional
 
 import random
@@ -183,10 +184,37 @@ class Khwan:
         return Turn(self._request("POST", "/prepare",
                                   {"input": user_input, **self._cfg}))
 
-    def record(self, turn: Turn, answer: str) -> dict:
-        """Hand your model's answer back so Khwan can persist + learn."""
-        return self._request("POST", "/record",
-                             {"turn_token": turn.turn_token, "answer": answer})
+    def record(self, turn: Turn, answer: str, *, background: bool = False) -> dict:
+        """Hand your model's answer back so Khwan can persist + learn.
+
+        Blocking by default, and that default is deliberate. ``prepare`` for the
+        next turn retrieves what has been written, so a ``record`` still in flight
+        means the turn you just had is missing from the context of the turn after
+        it — intermittently, under load, in a way that reads as "the memory is
+        flaky" rather than as a race. Correctness first; opt into the latency win.
+
+        ``background=True`` dispatches on a daemon thread and returns immediately
+        with ``{"queued": True}``. Use it when the turn is the last one (a one-shot
+        job, a webhook reply) or when the next ``prepare`` is far enough away that
+        the write will have landed. Failures are swallowed — a lost record costs
+        one turn of learning, and the point of this mode is never to delay a reply.
+
+        For a strict sequence at lower latency, prefer ``record`` on a thread you
+        join before the next ``prepare`` rather than fire-and-forget.
+        """
+        if not background:
+            return self._request("POST", "/record",
+                                 {"turn_token": turn.turn_token, "answer": answer})
+
+        def _send() -> None:
+            try:
+                self._request("POST", "/record",
+                              {"turn_token": turn.turn_token, "answer": answer})
+            except Exception:  # noqa: BLE001 — a failed learn must not raise into a thread
+                pass
+
+        threading.Thread(target=_send, daemon=True, name="khwan-record").start()
+        return {"queued": True}
 
     # ---- learning / inspection ----
     def sync(self) -> dict:
