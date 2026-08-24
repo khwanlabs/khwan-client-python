@@ -28,6 +28,28 @@ kw.record(turn, answer)                                          # Khwan persist
 kw.record(turn, answer, background=True)                         # → {"queued": True}
 ```
 
+## Gate the answer, review what it learned
+
+```python
+v = kw.verify(turn, draft)          # score a draft BEFORE you ship it
+if not v["ok"]:
+    ...                             # regenerate, or route to a human
+
+for l in kw.lessons():              # the standing rules it distilled
+    print(l["response_text"], "←", l["source_link"])
+kw.delete_lesson(bad_id)            # the only negative signal in the system
+```
+
+## Own the learning step
+
+`prepare → your model → record` covers answering. The same shape covers learning —
+Khwan clusters the turns, **your** model writes the rule, so no packet text reaches
+a provider Khwan chose:
+
+```python
+kw.synthesize(distill=lambda system, prompt: my_llm(system, prompt))
+```
+
 `turn.messages` is a standard `[{role, content}]` array with Khwan's value baked
 into the system prompt (learned lessons + constitution + retrieved memory + coherence).
 `your_model` is just your normal LLM call:
