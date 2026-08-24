@@ -1,0 +1,33 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The repo is public: this is what stops a drive-by PR — or us — from quietly
+# undoing a guarantee the tests exist to hold. test_verify_lessons_synthesis
+# asserts that synthesize() calls nothing but the caller's distill, and
+# test_record_background asserts that record() blocks by default. Both are
+# product promises, not implementation details.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported and current. A client library breaking on the Python
+        # a user already has is the kind of thing you find out from an issue.
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e . build twine
+      - run: python test_record_background.py
+      - run: python test_verify_lessons_synthesis.py
+      # Catches the metadata-version trap before a release does: the build has to
+      # produce something twine will actually accept.
+      - run: python -m build
+      - run: python -m twine check dist/*
