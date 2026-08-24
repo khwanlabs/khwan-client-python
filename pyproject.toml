@@ -1,11 +1,15 @@
 [project]
 name = "khwan"
-version = "0.2.0"
+version = "0.3.0"
 description = "Khwan hosted client — the cognition layer (memory + identity + learning) for your own agent. Bring your own model."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = ["requests>=2.28"]
+
+# httpx only for AsyncKhwan — a sync user should not pay for it.
+[project.optional-dependencies]
+async = ["httpx>=0.24"]
 
 [project.urls]
 Homepage = "https://khwan.ai"
