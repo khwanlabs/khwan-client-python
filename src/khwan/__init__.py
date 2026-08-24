@@ -25,7 +25,7 @@ exist only in the on-prem engine (shipped under license).
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import random
 import time
@@ -129,7 +129,12 @@ class Khwan:
     _RETRY_STATUS = frozenset({429, 502, 503, 504})
 
     def _is_idempotent(self, method: str, path: str) -> bool:
-        return method == "GET" or path == "/prepare"
+        # /verify is documented as non-destructive server-side: it never consumes
+        # the turn token and never persists, so a retry after a network blip is
+        # safe and beats failing a gate check on a dropped connection.
+        # /synthesize/prepare is deliberately NOT here — each call mints a new
+        # batch token, so a retry would orphan one.
+        return method == "GET" or path in ("/prepare", "/verify")
 
     def _retry_delay(self, attempt: int, resp: "Optional[requests.Response]") -> float:
         """Seconds to wait: honor Retry-After if present, else exponential
@@ -215,6 +220,102 @@ class Khwan:
 
         threading.Thread(target=_send, daemon=True, name="khwan-record").start()
         return {"queued": True}
+
+    def verify(self, turn: Turn, draft: str) -> dict:
+        """Score a draft answer against the brain BEFORE you ship it.
+
+        ``prepare`` gates the turn; this gates the *answer*. Returns
+        ``{ok, reason, coherence, contradiction}`` — ship when ``ok`` is true,
+        regenerate or route to a human when it is not.
+
+        Non-destructive: it never consumes the turn token, so ``record`` still
+        works normally afterwards. Treat a transport failure as ``ok`` rather than
+        blocking a reply on a network blip.
+        """
+        body: Dict[str, Any] = {"answer": draft}
+        if turn.turn_token:
+            body["turn_token"] = turn.turn_token
+        return self._request("POST", "/verify", body)
+
+    # ---- lesson review ----
+    def lessons(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """The standing rules synthesis has written for this core.
+
+        A lesson is a behaviour rule, not a fact — the most-reinforced ones are
+        injected on every turn regardless of relevance. ``source_link`` on each
+        entry points back at the turns it was distilled from.
+        """
+        out = self._request("GET", f"/lessons?limit={limit}")
+        return out.get("lessons", [])  # type: ignore[union-attr]
+
+    def delete_lesson(self, lesson_id: str) -> dict:
+        """Remove a rule the agent should not have learned.
+
+        Retrieval only reinforces — a lesson that gets used has its expiry
+        extended — so a rule that is wrong but relevant never expires on its own.
+        This is the only negative signal in the system.
+        """
+        return self._request("DELETE", f"/lessons/{lesson_id}")
+
+    def edit_lesson(self, lesson_id: str, text: str) -> dict:
+        """Correct a rule's wording, keeping its sources and use history.
+
+        The server re-embeds from the new text in the same write, so retrieval
+        matches what the rule now says rather than what it used to.
+        """
+        return self._request("PATCH", f"/lessons/{lesson_id}", {"text": text})
+
+    # ---- BYOM synthesis: the learning loop, with your model in the middle ----
+    def synthesize_prepare(self) -> dict:
+        """Cluster recent turns and hand them back for YOUR model to distil.
+
+        Returns ``{synthesis_token, system, clusters, packets_scanned}``. No model
+        is called — on this path no packet text reaches a provider Khwan chose.
+        ``synthesis_token`` is None when there is nothing to learn.
+
+        Feed ``system`` plus each cluster's ``prompt`` to your model; it answers
+        with one imperative rule, or the literal ``NONE``.
+        """
+        return self._request("POST", "/synthesize/prepare")
+
+    def synthesize_record(self, synthesis_token: str,
+                          lessons: List[Dict[str, Any]]) -> dict:
+        """Store the rules your model distilled. ``lessons`` is a list of
+        ``{"cluster_id": ..., "text": ... or None}``; None records that the cluster
+        held nothing durable, which is an outcome rather than a failure."""
+        return self._request("POST", "/synthesize/record",
+                             {"synthesis_token": synthesis_token, "lessons": lessons})
+
+    def synthesize(self, distill: Callable[[str, str], Optional[str]]) -> dict:
+        """Run a whole BYOM synthesis pass, with ``distill`` as your model.
+
+        ``distill(system, prompt)`` is called once per cluster and returns the rule,
+        or None/"NONE" when there is nothing durable in it. The SDK never calls a
+        model itself — this only owns the loop and the token, which is the part that
+        is tedious rather than the part that is yours::
+
+            kw.synthesize(lambda system, prompt: my_llm(system, prompt))
+
+        A cluster whose ``distill`` raises is skipped rather than losing the batch;
+        the others still record. Returns the server's summary, or a skipped-shaped
+        dict when there was nothing to learn.
+        """
+        plan = self.synthesize_prepare()
+        token = plan.get("synthesis_token")
+        if not token:
+            return {"lessons_created": 0, "skipped": 0,
+                    "packets_scanned": plan.get("packets_scanned", 0),
+                    "status": "skipped"}
+
+        system = plan.get("system", "")
+        out: List[Dict[str, Any]] = []
+        for c in plan.get("clusters", []):
+            try:
+                text = distill(system, c["prompt"])
+            except Exception:  # noqa: BLE001 — one bad cluster must not lose the batch
+                text = None
+            out.append({"cluster_id": c["id"], "text": text})
+        return self.synthesize_record(token, out)
 
     # ---- learning / inspection ----
     def sync(self) -> dict:
