@@ -20,6 +20,12 @@ kw = Khwan(api_key="kwk_live_xxx", user_id="alice")
 turn   = kw.prepare("remember I prefer short answers in Thai")  # Khwan builds context, no LLM
 answer = your_model(turn.messages)                              # YOUR model + key
 kw.record(turn, answer)                                          # Khwan persists + learns
+
+# `record` waits by default, on purpose: `prepare` for the next turn reads what
+# has been written, so a record still in flight drops this turn from the next
+# turn's context — only under load, which makes it read as flaky memory rather
+# than as a race. Skip the wait when the turn is the last one:
+kw.record(turn, answer, background=True)                         # → {"queued": True}
 ```
 
 `turn.messages` is a standard `[{role, content}]` array with Khwan's value baked
