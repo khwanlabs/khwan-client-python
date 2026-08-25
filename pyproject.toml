@@ -14,6 +14,11 @@ async = ["httpx>=0.24"]
 [project.urls]
 Homepage = "https://khwan.ai"
 Documentation = "https://docs.khwan.ai"
+# PyPI renders this as "Source" in the sidebar. Without it the page offers no
+# route to the code at all — and a reviewer who went looking for exactly this
+# repository concluded it was closed, which it never was.
+Repository = "https://github.com/khwanlabs/khwan-client-python"
+Issues = "https://github.com/khwanlabs/khwan-client-python/issues"
 
 [build-system]
 requires = ["hatchling<1.28"]
