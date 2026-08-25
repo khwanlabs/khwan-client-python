@@ -228,7 +228,8 @@ class Khwan:
         return Turn(self._request("POST", "/prepare",
                                   {"input": user_input, **self._cfg}))
 
-    def record(self, turn: Turn, answer: str, *, background: bool = False) -> dict:
+    def record(self, turn: Turn, answer: str, *, background: bool = False,
+               occurred_at: "Optional[datetime]" = None) -> dict:
         """Hand your model's answer back so Khwan can persist + learn.
 
         Blocking by default, and that default is deliberate. ``prepare`` for the
@@ -245,15 +246,21 @@ class Khwan:
 
         For a strict sequence at lower latency, prefer ``record`` on a thread you
         join before the next ``prepare`` rather than fire-and-forget.
+
+        ``occurred_at`` says when the turn HAPPENED, when that is not now —
+        importing history, replaying a transcript. Without it an import stamps
+        every packet with the minute it ran, and retrieval cannot tell a decision
+        from June from one made this morning. The server clamps it to the present.
         """
+        body: Dict[str, Any] = {"turn_token": turn.turn_token, "answer": answer}
+        if occurred_at is not None:
+            body["occurred_at"] = occurred_at.isoformat()
         if not background:
-            return self._request("POST", "/record",
-                                 {"turn_token": turn.turn_token, "answer": answer})
+            return self._request("POST", "/record", body)
 
         def _send() -> None:
             try:
-                self._request("POST", "/record",
-                              {"turn_token": turn.turn_token, "answer": answer})
+                self._request("POST", "/record", body)
             except Exception:  # noqa: BLE001 — a failed learn must not raise into a thread
                 pass
             finally:
@@ -517,7 +524,8 @@ class AsyncKhwan:
         return Turn(await self._request("POST", "/prepare",
                                         {"input": user_input, **self._cfg}))
 
-    async def record(self, turn: Turn, answer: str, *, background: bool = False) -> dict:
+    async def record(self, turn: Turn, answer: str, *, background: bool = False,
+                     occurred_at: "Optional[datetime]" = None) -> dict:
         """Hand your model's answer back so Khwan can persist + learn.
 
         Awaited by default, and that default is deliberate: the next ``prepare``
@@ -530,7 +538,9 @@ class AsyncKhwan:
         when the turn is the last one, or when the next prepare is far enough away.
         Failures are swallowed; ``aclose()`` waits for what is still in flight.
         """
-        body = {"turn_token": turn.turn_token, "answer": answer}
+        body: Dict[str, Any] = {"turn_token": turn.turn_token, "answer": answer}
+        if occurred_at is not None:
+            body["occurred_at"] = occurred_at.isoformat()
         if not background:
             return await self._request("POST", "/record", body)
 
