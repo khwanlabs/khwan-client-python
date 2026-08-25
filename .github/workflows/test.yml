@@ -24,9 +24,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e . build twine
+      # .[async] so the AsyncKhwan suite can run — it is half the client now.
+      - run: pip install -e ".[async]" build twine
       - run: python test_record_background.py
       - run: python test_verify_lessons_synthesis.py
+      - run: python test_async_client.py
+      - run: python test_flush.py
+      - run: python test_occurred_at.py
       # Catches the metadata-version trap before a release does: the build has to
       # produce something twine will actually accept.
       - run: python -m build

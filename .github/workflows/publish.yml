@@ -1,0 +1,37 @@
+name: publish
+
+# Publishing happens from a GitHub Release, over PyPI's Trusted Publishing —
+# OIDC, so there is no API token in the repository, in a secret, or anywhere to
+# rotate. A project-scoped token already cost a 403 here once, and the reflex fix
+# for that is an account-wide token, which is the version worth avoiding.
+#
+# One-time setup on PyPI: this project's Publishing settings, add a GitHub
+# publisher for khwanlabs/khwan-client-python, workflow `publish.yml`,
+# environment `pypi`.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # Required for OIDC. Nothing else is, and nothing else is granted.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[async]" build twine
+      # Never publish something that does not pass its own tests. A release tag
+      # is the last place to find that out.
+      - run: python test_record_background.py
+      - run: python test_verify_lessons_synthesis.py
+      - run: python test_async_client.py
+      - run: python test_flush.py
+      - run: python test_occurred_at.py
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: pypa/gh-action-pypi-publish@release/v1
