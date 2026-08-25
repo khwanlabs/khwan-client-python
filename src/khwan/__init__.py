@@ -35,7 +35,7 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 DEFAULT_BASE_URL = "https://api.khwan.ai"
 
 
