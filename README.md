@@ -26,7 +26,16 @@ kw.record(turn, answer)                                          # Khwan persist
 # turn's context — only under load, which makes it read as flaky memory rather
 # than as a race. Skip the wait when the turn is the last one:
 kw.record(turn, answer, background=True)                         # → {"queued": True}
+
+# The send runs on a daemon thread, and the interpreter does not wait for those.
+# In a CLI, a serverless handler, or any script that ends soon after its last
+# turn, that write can be killed mid-flight — no error, the turn simply never
+# learned. Wait for it before you exit:
+kw.flush()                                                       # → how many were in flight
 ```
+
+A `flush()` also runs automatically at interpreter exit, bounded to five seconds,
+so forgetting the call costs latency rather than the turn.
 
 ## On an event loop
 
