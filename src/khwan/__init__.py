@@ -25,6 +25,7 @@ exist only in the on-prem engine (shipped under license).
 from __future__ import annotations
 
 import asyncio
+import atexit
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
@@ -34,7 +35,7 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 DEFAULT_BASE_URL = "https://api.khwan.ai"
 
 
@@ -179,6 +180,14 @@ class Khwan:
         # Auto-retry transient failures (429/502/503/504 honoring Retry-After, plus
         # network errors on idempotent calls) with exponential backoff + jitter.
         self._max_retries = max(0, max_retries)
+        # Live background records. A daemon thread is killed the moment the
+        # interpreter exits, so a fire-and-forget write in a CLI, a serverless
+        # handler or any short-lived process can be dropped mid-flight with no
+        # error anywhere — the turn is simply never learned. Tracking them is what
+        # makes flush() possible, and atexit makes it happen even unasked.
+        self._pending: "set[threading.Thread]" = set()
+        self._pending_lock = threading.Lock()
+        atexit.register(self._flush_at_exit)
         # session config forwarded to the server (model may be overridden by the
         # account's dashboard settings; constitution is a named profile reference).
         self._cfg = {k: v for k, v in
@@ -247,9 +256,48 @@ class Khwan:
                               {"turn_token": turn.turn_token, "answer": answer})
             except Exception:  # noqa: BLE001 — a failed learn must not raise into a thread
                 pass
+            finally:
+                with self._pending_lock:
+                    self._pending.discard(threading.current_thread())
 
-        threading.Thread(target=_send, daemon=True, name="khwan-record").start()
+        t = threading.Thread(target=_send, daemon=True, name="khwan-record")
+        with self._pending_lock:
+            self._pending.add(t)
+        t.start()
         return {"queued": True}
+
+    def flush(self, timeout: Optional[float] = None) -> int:
+        """Wait for background records to finish. Returns how many were still in
+        flight when called.
+
+        Only matters after ``record(background=True)``. Call it before a
+        short-lived process ends — a CLI, a serverless handler, a script — because
+        the sending threads are daemons and the interpreter will not wait for them.
+
+        ``timeout`` is the total budget in seconds, not per thread. It returns
+        rather than raising when the budget runs out: a record that did not land
+        costs one turn of learning, and turning that into an exception at exit
+        would be worse than the thing it reports.
+        """
+        with self._pending_lock:
+            threads = list(self._pending)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for t in threads:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            t.join(remaining)
+        return len(threads)
+
+    def _flush_at_exit(self) -> None:
+        """Last-chance flush, bounded so a hung request cannot wedge the exit.
+
+        A developer who never calls flush() should still not silently lose the
+        last turn of a script, which is the common case and the one that reads as
+        "the memory is unreliable" rather than as a missing call.
+        """
+        try:
+            self.flush(timeout=5.0)
+        except Exception:  # noqa: BLE001 — never raise from an interpreter shutdown
+            pass
 
     def verify(self, turn: Turn, draft: str) -> dict:
         """Score a draft answer against the brain BEFORE you ship it.
