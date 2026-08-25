@@ -64,9 +64,12 @@ def test_verify_is_retryable_but_synthesize_prepare_is_not():
     """/verify never consumes the token server-side, so retrying it is safe.
     /synthesize/prepare mints a new batch each call — retrying orphans one."""
     kw = _client()
-    assert kw._is_idempotent("POST", "/verify") is True
-    assert kw._is_idempotent("POST", "/synthesize/prepare") is False
-    assert kw._is_idempotent("POST", "/synthesize/record") is False
+    # The policy is module-level so the sync and async clients share one copy of
+    # it; asserting there keeps this test pinned to the rule, not to a class.
+    from khwan import _is_idempotent
+    assert _is_idempotent("POST", "/verify") is True
+    assert _is_idempotent("POST", "/synthesize/prepare") is False
+    assert _is_idempotent("POST", "/synthesize/record") is False
     print("✓ verify retries; synthesize prepare/record do not")
 
 

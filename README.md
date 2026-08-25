@@ -28,6 +28,49 @@ kw.record(turn, answer)                                          # Khwan persist
 kw.record(turn, answer, background=True)                         # → {"queued": True}
 ```
 
+## On an event loop
+
+Every agent framework worth integrating is async, and a blocking client on an
+event loop either stalls it or grows a thread pool to hide the stall. `AsyncKhwan`
+is the same loop, the same retry rules — they live at module level, so the two
+clients cannot drift — and the same errors.
+
+```bash
+pip install "khwan[async]"
+```
+
+```python
+from khwan import AsyncKhwan
+
+# Holds one connection pool, so keep it open rather than building one per turn.
+async with AsyncKhwan(api_key="kwk_live_xxx", core="acme", user_id="Web") as kw:
+    turn   = await kw.prepare("what did we decide about billing?")
+    answer = await your_model(turn.messages)
+    await kw.record(turn, answer)
+
+    await kw.record(turn, answer, background=True)   # → {"queued": True}
+```
+
+`background=True` schedules the write and returns immediately; `aclose()` — which
+`async with` calls for you — waits for anything still in flight, so a fire-and-
+forget record is not lost when the process ends.
+
+## What the brain already knew
+
+`prepare` returns the raw turns it retrieved *and* the rules synthesis has
+distilled from many past turns. Both are already inside `turn.messages`; they are
+also exposed so a caller building its own context — a recall tool, a subagent
+brief — can take the distilled rules without replaying the whole prompt.
+
+```python
+turn.lessons   # ["Answer in Thai.", …]  standing rules
+turn.sources   # the raw turns retrieved for THIS turn, each with a similarity
+```
+
+Retrieval applies a relevance floor, so an empty `sources` is an answer: the brain
+has nothing close to this question. Read it as "not known here" rather than
+reaching for whichever memory was nearest.
+
 ## Gate the answer, review what it learned
 
 ```python

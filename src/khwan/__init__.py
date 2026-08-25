@@ -24,6 +24,7 @@ exist only in the on-prem engine (shipped under license).
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
@@ -33,7 +34,7 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 DEFAULT_BASE_URL = "https://api.khwan.ai"
 
 
@@ -61,6 +62,18 @@ class Turn:
         return self._d.get("coherence")
 
     @property
+    def lessons(self) -> List[str]:
+        """Standing rules synthesis distilled from many past turns.
+
+        Separate from `sources`, which is the raw context retrieved for THIS turn.
+        Both are already inside `messages`; they are surfaced so a caller building
+        its own context — a recall tool, a subagent brief — can take the distilled
+        rules without replaying the whole prepared prompt. Empty against an engine
+        that predates them.
+        """
+        return [str(x) for x in (self._d.get("lessons") or []) if str(x).strip()]
+
+    @property
     def sources(self) -> List[Any]:
         return self._d.get("sources", [])
 
@@ -78,6 +91,64 @@ class Turn:
 
     def raw(self) -> Dict[str, Any]:
         return self._d
+
+
+# ── Transport policy, shared by both clients ──────────────────────────────────
+# Kept at module level rather than on the class so the sync and async clients
+# cannot drift: a retry rule that holds for one holds for the other.
+
+# Rejected before processing, so retrying is always safe.
+RETRY_STATUS = frozenset({429, 502, 503, 504})
+
+
+def _is_idempotent(method: str, path: str) -> bool:
+    """Whether an AMBIGUOUS failure (network error, timeout) may be retried.
+
+    Reads and /prepare are safe: the request may already have been processed, and
+    doing it twice costs nothing. record/sync/reset are not — replaying could
+    double-apply or hit an already-consumed turn_token.
+
+    /verify is here because the server documents it as non-destructive: it never
+    consumes the token and never persists, so a retry after a dropped connection
+    beats failing a gate check. /synthesize/prepare is deliberately absent — each
+    call mints a new batch token, and a retry would orphan one.
+    """
+    return method == "GET" or path in ("/prepare", "/verify")
+
+
+def _retry_delay(attempt: int, retry_after: Optional[str]) -> float:
+    """Seconds to wait: honour Retry-After when the server sent one, else
+    exponential (0.5, 1, 2, … capped at 20s) with ±25% jitter."""
+    if retry_after:
+        try:
+            return min(float(retry_after), 60.0)
+        except ValueError:
+            try:
+                dt = parsedate_to_datetime(retry_after)
+                return max(0.0, dt.timestamp() - time.time())
+            except (TypeError, ValueError):
+                pass
+    base = min(0.5 * (2 ** attempt), 20.0)
+    return base * (0.75 + random.random() * 0.5)
+
+
+def _error_message(status: int, text: str) -> str:
+    """A message that says what to DO, for the statuses with an obvious answer."""
+    return {
+        401: "unauthorized — bad or missing API key",
+        402: "payment required — add a payment method / upgrade your plan",
+        404: "not found — check the core in X-Khwan-Core exists",
+        429: "rate limited / over your plan's limit — retry later",
+    }.get(status, text[:300])
+
+
+def _auth_headers(api_key: str, user_id: Optional[str], core: Optional[str]) -> Dict[str, str]:
+    h = {"X-API-Key": api_key}
+    if user_id:
+        h["X-Khwan-User"] = user_id   # optional: isolated sub-brain per end-user
+    if core:
+        h["X-Khwan-Core"] = core      # select the isolated core
+    return h
 
 
 class Khwan:
@@ -115,46 +186,10 @@ class Khwan:
 
     # ---- transport ----
     def _headers(self) -> Dict[str, str]:
-        h = {"X-API-Key": self._key}
-        if self.user_id:
-            h["X-Khwan-User"] = self.user_id  # optional: isolated sub-brain per end-user
-        if self.core:
-            h["X-Khwan-Core"] = self.core  # select the isolated core
-        return h
-
-    # Reads + prepare are safe to retry after an ambiguous network error (the
-    # request may already have been processed); record/sync/reset are NOT (replaying
-    # could double-apply or hit an already-consumed turn_token). A rejected
-    # 429/502/503/504 is safe to retry regardless — it wasn't processed.
-    _RETRY_STATUS = frozenset({429, 502, 503, 504})
-
-    def _is_idempotent(self, method: str, path: str) -> bool:
-        # /verify is documented as non-destructive server-side: it never consumes
-        # the turn token and never persists, so a retry after a network blip is
-        # safe and beats failing a gate check on a dropped connection.
-        # /synthesize/prepare is deliberately NOT here — each call mints a new
-        # batch token, so a retry would orphan one.
-        return method == "GET" or path in ("/prepare", "/verify")
-
-    def _retry_delay(self, attempt: int, resp: "Optional[requests.Response]") -> float:
-        """Seconds to wait: honor Retry-After if present, else exponential
-        (0.5, 1, 2, … capped 20s) with ±25% jitter."""
-        if resp is not None:
-            ra = resp.headers.get("Retry-After")
-            if ra:
-                try:
-                    return min(float(ra), 60.0)
-                except ValueError:
-                    try:
-                        dt = parsedate_to_datetime(ra)
-                        return max(0.0, dt.timestamp() - time.time())
-                    except (TypeError, ValueError):
-                        pass
-        base = min(0.5 * (2 ** attempt), 20.0)
-        return base * (0.75 + random.random() * 0.5)
+        return _auth_headers(self._key, self.user_id, self.core)
 
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
-        idempotent = self._is_idempotent(method, path)
+        idempotent = _is_idempotent(method, path)
         attempt = 0
         while True:
             try:
@@ -164,23 +199,18 @@ class Khwan:
             except requests.RequestException as e:
                 # Network/timeout error — retry only idempotent calls.
                 if idempotent and attempt < self._max_retries:
-                    time.sleep(self._retry_delay(attempt, None))
+                    time.sleep(_retry_delay(attempt, None))
                     attempt += 1
                     continue
                 raise KhwanError(0, f"network error: {e}")
 
-            if r.status_code in self._RETRY_STATUS and attempt < self._max_retries:
-                time.sleep(self._retry_delay(attempt, r))
+            if r.status_code in RETRY_STATUS and attempt < self._max_retries:
+                time.sleep(_retry_delay(attempt, r.headers.get("Retry-After")))
                 attempt += 1
                 continue
 
             if r.status_code // 100 != 2:
-                msg = {
-                    401: "unauthorized — bad or missing API key",
-                    402: "payment required — add a payment method / upgrade your plan",
-                    429: "rate limited / over your plan's limit — retry later",
-                }.get(r.status_code, r.text[:300])
-                raise KhwanError(r.status_code, msg)
+                raise KhwanError(r.status_code, _error_message(r.status_code, r.text))
             return r.json() if r.content else {}
 
     # ---- the memory loop: prepare → (your model) → record ----
@@ -333,4 +363,160 @@ class Khwan:
         return self._request("GET", "/cores")  # type: ignore[return-value]
 
 
-__all__ = ["Khwan", "Turn", "KhwanError"]
+__all__ = ["Khwan", "AsyncKhwan", "Turn", "KhwanError"]
+
+
+# ── Async client ──────────────────────────────────────────────────────────────
+
+class AsyncKhwan:
+    """The same loop for an async host: ``prepare`` → (your model) → ``record``.
+
+    Every agent framework worth integrating is async — an event loop calling a
+    blocking client either stalls it or grows a thread pool to hide the stall, so
+    each integration ends up rewriting this transport instead of using one.
+
+    Same surface, same retry rules (they are module-level, so the two cannot
+    drift), same errors. Needs httpx::
+
+        pip install "khwan[async]"
+
+    Reuses one connection pool, so hold it open rather than making one per turn::
+
+        async with AsyncKhwan(api_key="kwk_live_xxx", core="acme") as kw:
+            turn   = await kw.prepare("what did we decide about billing?")
+            answer = await your_model(turn.messages)
+            await kw.record(turn, answer)
+
+    Without the context manager, call ``aclose()`` when finished.
+    """
+
+    def __init__(self, *, user_id: Optional[str] = None, api_key: Optional[str] = None,
+                 base_url: str = DEFAULT_BASE_URL,
+                 model: Optional[str] = None, constitution: Optional[str] = None,
+                 core: Optional[str] = None,
+                 timeout: int = 60, max_retries: int = 2):
+        try:
+            import httpx  # noqa: F401
+        except ModuleNotFoundError as e:  # pragma: no cover - import guard
+            raise ModuleNotFoundError(
+                'AsyncKhwan needs httpx — install with: pip install "khwan[async]"'
+            ) from e
+        if not api_key:
+            raise ValueError("api_key is required (get one from your Khwan dashboard).")
+        self.user_id = user_id
+        self.core = core
+        self._key = api_key
+        self._base = base_url.rstrip("/")
+        self._timeout = timeout
+        self._max_retries = max(0, max_retries)
+        self._cfg = {k: v for k, v in
+                     {"model": model, "constitution": constitution}.items() if v}
+        self._client = None  # created lazily, on the loop that will use it
+        # Fire-and-forget records are held here: asyncio keeps only a weak
+        # reference to a task, so without this they can be collected mid-flight.
+        self._pending: set = set()
+
+    async def __aenter__(self) -> "AsyncKhwan":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.aclose()
+
+    def _http(self):
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self._base,
+                timeout=httpx.Timeout(self._timeout, connect=10.0),
+                headers=_auth_headers(self._key, self.user_id, self.core),
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the pool, after letting any background records finish."""
+        if self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+        import httpx
+        idempotent = _is_idempotent(method, path)
+        attempt = 0
+        while True:
+            try:
+                r = await self._http().request(method, path, json=body)
+            except httpx.HTTPError as e:
+                if idempotent and attempt < self._max_retries:
+                    await asyncio.sleep(_retry_delay(attempt, None))
+                    attempt += 1
+                    continue
+                raise KhwanError(0, f"network error: {e}")
+
+            if r.status_code in RETRY_STATUS and attempt < self._max_retries:
+                await asyncio.sleep(_retry_delay(attempt, r.headers.get("Retry-After")))
+                attempt += 1
+                continue
+
+            if r.status_code // 100 != 2:
+                raise KhwanError(r.status_code, _error_message(r.status_code, r.text))
+            return r.json() if r.content else {}
+
+    # ---- the memory loop ----
+    async def prepare(self, user_input: str) -> Turn:
+        """Khwan builds the context (memory + constitution + coherence). No LLM call."""
+        return Turn(await self._request("POST", "/prepare",
+                                        {"input": user_input, **self._cfg}))
+
+    async def record(self, turn: Turn, answer: str, *, background: bool = False) -> dict:
+        """Hand your model's answer back so Khwan can persist + learn.
+
+        Awaited by default, and that default is deliberate: the next ``prepare``
+        retrieves what has been written, so a record still in flight means the turn
+        you just had is missing from the context of the turn after it —
+        intermittently, under load, reading as "the memory is flaky" rather than as
+        a race.
+
+        ``background=True`` schedules it and returns ``{"queued": True}``. Use it
+        when the turn is the last one, or when the next prepare is far enough away.
+        Failures are swallowed; ``aclose()`` waits for what is still in flight.
+        """
+        body = {"turn_token": turn.turn_token, "answer": answer}
+        if not background:
+            return await self._request("POST", "/record", body)
+
+        async def _send() -> None:
+            try:
+                await self._request("POST", "/record", body)
+            except Exception:  # noqa: BLE001 — a failed learn must not raise into the loop
+                pass
+
+        task = asyncio.ensure_future(_send())
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+        return {"queued": True}
+
+    async def verify(self, turn: Turn, draft: str) -> dict:
+        """Score a draft answer against the brain BEFORE you ship it.
+
+        ``prepare`` gates the turn; this gates the *answer*. Non-destructive — it
+        never consumes the turn token. Treat a transport failure as ``ok`` rather
+        than blocking a reply on a network blip.
+        """
+        body: Dict[str, Any] = {"answer": draft}
+        if turn.turn_token:
+            body["turn_token"] = turn.turn_token
+        return await self._request("POST", "/verify", body)
+
+    # ---- inspection ----
+    async def lessons(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """The standing rules synthesis has written for this core."""
+        return await self._request("GET", f"/lessons?limit={limit}")  # type: ignore[return-value]
+
+    async def memory(self, limit: int = 20) -> dict:
+        return await self._request("GET", f"/memory?limit={limit}")
+
+    async def cores(self) -> List[Dict[str, Any]]:
+        """List the isolated cores on this account."""
+        return await self._request("GET", "/cores")  # type: ignore[return-value]
