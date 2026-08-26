@@ -131,6 +131,30 @@ kw.cores()   # list the account's cores (the default core is included)
 
 `test` and `client1` never share memory. Omit `core` for the account's default brain.
 
+## Two ways to authenticate
+
+An **API key** is a long-lived account secret. It is the right credential when
+the process belongs to you — a script, a job, a server you run:
+
+```python
+Khwan(api_key="kwk_live_…")          # sent as X-API-Key
+```
+
+A **bearer token** is an OAuth access token minted for one end user, short-lived
+and scoped to a resource. It is the right credential when you are acting on
+someone's behalf and should never hold their key — a remote MCP server, or any
+service where the caller authenticated with Khwan rather than with you:
+
+```python
+Khwan(bearer_token=access_token)     # sent as Authorization: Bearer
+```
+
+Pass exactly one. They are not interchangeable at the wire: a token placed in
+`api_key` is looked up as an API key, misses, and 401s — it never reaches the
+bearer path, and the error does not say why.
+
+`core` and `user_id` work the same with either.
+
 ## On-prem
 Same code, point at your instance:
 ```python

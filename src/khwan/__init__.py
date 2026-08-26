@@ -143,8 +143,18 @@ def _error_message(status: int, text: str) -> str:
     }.get(status, text[:300])
 
 
-def _auth_headers(api_key: str, user_id: Optional[str], core: Optional[str]) -> Dict[str, str]:
-    h = {"X-API-Key": api_key}
+def _auth_headers(api_key: Optional[str], user_id: Optional[str], core: Optional[str],
+                  bearer_token: Optional[str] = None) -> Dict[str, str]:
+    """Whichever credential this client was built with.
+
+    Two kinds, and they are not interchangeable at the wire. An API key is a
+    long-lived secret the account owns and sends as `X-API-Key`. A bearer token
+    is an OAuth access token minted for one user, short-lived and scoped to a
+    resource, and the API reads it from `Authorization`. Sending a JWT in the
+    API-key header does not "also work" — it is looked up as a key, fails, and
+    401s before the bearer path is ever reached.
+    """
+    h = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else {"X-API-Key": api_key or ""}
     if user_id:
         h["X-Khwan-User"] = user_id   # optional: isolated sub-brain per end-user
     if core:
@@ -154,6 +164,7 @@ def _auth_headers(api_key: str, user_id: Optional[str], core: Optional[str]) -> 
 
 class Khwan:
     def __init__(self, *, user_id: Optional[str] = None, api_key: Optional[str] = None,
+                 bearer_token: Optional[str] = None,
                  base_url: str = DEFAULT_BASE_URL,
                  model: Optional[str] = None, constitution: Optional[str] = None,
                  core: Optional[str] = None,
@@ -164,8 +175,11 @@ class Khwan:
                 "memory/embedder are server-managed in the hosted client; they are "
                 "only configurable in the on-prem engine (khwan-engine, under license)."
             )
-        if not api_key:
-            raise ValueError("api_key is required (get one from your Khwan dashboard).")
+        if bool(api_key) == bool(bearer_token):
+            raise ValueError(
+                "pass exactly one of api_key or bearer_token — an api_key from your "
+                "Khwan dashboard, or an OAuth access token for one user."
+            )
         # OPTIONAL end-user id. Omit for one shared brain per account/core. Set it to give
         # each of your end-users a fully ISOLATED sub-brain (one key → a private brain per
         # user); requires a paid plan. Combines with `core`: account::<core>::@<user>.
@@ -175,6 +189,7 @@ class Khwan:
         # Omit for the account's default core.
         self.core = core
         self._key = api_key
+        self._bearer = bearer_token
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         # Auto-retry transient failures (429/502/503/504 honoring Retry-After, plus
@@ -195,7 +210,7 @@ class Khwan:
 
     # ---- transport ----
     def _headers(self) -> Dict[str, str]:
-        return _auth_headers(self._key, self.user_id, self.core)
+        return _auth_headers(self._key, self.user_id, self.core, self._bearer)
 
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
         idempotent = _is_idempotent(method, path)
@@ -447,6 +462,7 @@ class AsyncKhwan:
 
     def __init__(self, *, user_id: Optional[str] = None, api_key: Optional[str] = None,
                  base_url: str = DEFAULT_BASE_URL,
+                 bearer_token: Optional[str] = None,
                  model: Optional[str] = None, constitution: Optional[str] = None,
                  core: Optional[str] = None,
                  timeout: int = 60, max_retries: int = 2):
@@ -456,11 +472,15 @@ class AsyncKhwan:
             raise ModuleNotFoundError(
                 'AsyncKhwan needs httpx — install with: pip install "khwan[async]"'
             ) from e
-        if not api_key:
-            raise ValueError("api_key is required (get one from your Khwan dashboard).")
+        if bool(api_key) == bool(bearer_token):
+            raise ValueError(
+                "pass exactly one of api_key or bearer_token — an api_key from your "
+                "Khwan dashboard, or an OAuth access token for one user."
+            )
         self.user_id = user_id
         self.core = core
         self._key = api_key
+        self._bearer = bearer_token
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._max_retries = max(0, max_retries)
@@ -483,7 +503,7 @@ class AsyncKhwan:
             self._client = httpx.AsyncClient(
                 base_url=self._base,
                 timeout=httpx.Timeout(self._timeout, connect=10.0),
-                headers=_auth_headers(self._key, self.user_id, self.core),
+                headers=_auth_headers(self._key, self.user_id, self.core, self._bearer),
             )
         return self._client
 
