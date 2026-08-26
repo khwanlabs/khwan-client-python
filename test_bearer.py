@@ -91,3 +91,45 @@ def test_async_client_refuses_both():
     from khwan import AsyncKhwan
     with pytest.raises(ValueError, match="exactly one"):
         AsyncKhwan(api_key="kwk_live_x", bearer_token=JWT)
+
+
+# ── what an error says ────────────────────────────────────────────────────────
+# The hint used to be the whole message and the server's text was discarded,
+# which hides the only part that separates causes.
+
+from khwan import _error_message  # noqa: E402
+
+
+def test_the_servers_own_words_survive():
+    """`Invalid bearer token` and `Missing credentials` are different problems."""
+    rejected = _error_message(401, "Invalid bearer token", True)
+    absent = _error_message(401, "Missing credentials (X-API-Key or Authorization: Bearer)", True)
+    assert "Invalid bearer token" in rejected
+    assert "Missing credentials" in absent
+    assert rejected != absent
+
+
+def test_a_bearer_caller_is_not_sent_looking_for_an_api_key():
+    """The wrong turn: an OAuth caller has no API key to check."""
+    msg = _error_message(401, "Invalid bearer token", True)
+    assert "API key" not in msg
+    assert "authorize again" in msg
+
+
+def test_an_api_key_caller_still_hears_about_the_key():
+    msg = _error_message(401, "Invalid API key", False)
+    assert "API key" in msg
+
+
+def test_other_statuses_keep_their_hint_and_gain_the_detail():
+    msg = _error_message(402, "per-user memory: the free plan allows 3 sub-brain(s)")
+    assert "upgrade" in msg
+    assert "free plan allows 3" in msg
+
+
+def test_an_unmapped_status_is_just_the_server_text():
+    assert _error_message(500, "internal error") == "internal error"
+
+
+def test_no_detail_leaves_the_hint_alone():
+    assert _error_message(429, "") == "rate limited / over your plan's limit — retry later"
