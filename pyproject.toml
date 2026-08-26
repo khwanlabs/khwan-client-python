@@ -1,6 +1,6 @@
 [project]
 name = "khwan"
-version = "0.4.0"
+version = "0.4.1"
 description = "Khwan hosted client — the cognition layer (memory + identity + learning) for your own agent. Bring your own model."
 readme = "README.md"
 requires-python = ">=3.9"
