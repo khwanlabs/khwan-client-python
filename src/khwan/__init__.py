@@ -133,14 +133,31 @@ def _retry_delay(attempt: int, retry_after: Optional[str]) -> float:
     return base * (0.75 + random.random() * 0.5)
 
 
-def _error_message(status: int, text: str) -> str:
-    """A message that says what to DO, for the statuses with an obvious answer."""
-    return {
-        401: "unauthorized — bad or missing API key",
+def _error_message(status: int, text: str, bearer: bool = False) -> str:
+    """What to DO about this status, followed by what the server actually said.
+
+    The hint alone used to be the whole message, and the server's text was
+    dropped. That hides the only part that distinguishes causes: a 401 for a
+    credential that was rejected reads identically to a 401 for one that never
+    arrived, and the caller cannot tell which without guessing.
+
+    The 401 hint also depends on WHICH credential this client carries. An
+    OAuth-authenticated caller has no API key to check, and being sent to look
+    for one is a wrong turn rather than a vague one.
+    """
+    hint = {
+        401: ("unauthorized — the OAuth token was rejected or missing; it may have "
+              "expired, in which case authorize again")
+             if bearer else
+             ("unauthorized — bad or missing API key"),
         402: "payment required — add a payment method / upgrade your plan",
         404: "not found — check the core in X-Khwan-Core exists",
         429: "rate limited / over your plan's limit — retry later",
-    }.get(status, text[:300])
+    }.get(status)
+    detail = (text or "").strip()[:300]
+    if hint and detail:
+        return f"{hint} ({detail})"
+    return hint or detail
 
 
 def _auth_headers(api_key: Optional[str], user_id: Optional[str], core: Optional[str],
@@ -234,7 +251,7 @@ class Khwan:
                 continue
 
             if r.status_code // 100 != 2:
-                raise KhwanError(r.status_code, _error_message(r.status_code, r.text))
+                raise KhwanError(r.status_code, _error_message(r.status_code, r.text, bool(self._bearer)))
             return r.json() if r.content else {}
 
     # ---- the memory loop: prepare → (your model) → record ----
@@ -535,7 +552,7 @@ class AsyncKhwan:
                 continue
 
             if r.status_code // 100 != 2:
-                raise KhwanError(r.status_code, _error_message(r.status_code, r.text))
+                raise KhwanError(r.status_code, _error_message(r.status_code, r.text, bool(self._bearer)))
             return r.json() if r.content else {}
 
     # ---- the memory loop ----
